@@ -1,22 +1,22 @@
 import tensorflow.compat.v1 as tf
 tf.disable_v2_behavior()  
 # import tensorflow as tf
-
+# print(tf.__version__)
 
 import matplotlib.pyplot as plt
-import matplotlib.colors as colors
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-import numpy as np
 import seaborn as sns
-import glob
+import numpy as np
 import pandas as pd
-from pandas import DataFrame 
 import random
+import glob
+
 from sklearn import metrics
 from sklearn.utils import shuffle
 import os
 import pickle as pkl
+
 import datetime
+
 
 # ==== fix random seed for reproducibility =====
 seed = 1  # use this constant seed everywhere
@@ -30,6 +30,7 @@ session_conf = tf.ConfigProto(intra_op_parallelism_threads=1,
                               allow_soft_placement=True,
                               device_count = {'CPU' : 1, 'GPU' : 0})
 sess = tf.Session(graph=tf.get_default_graph(), config=session_conf)
+
 
 ##-----------------------------------------
 ## --- calculate Prediction interval -----
@@ -66,66 +67,49 @@ def calc_RMSE(y_pred, y):
 def calc_NLL(y_pred, y, y_std):                  
     return np.mean(0.5*((((y_pred.ravel() - y.ravel())**2)/((y_std.ravel()**2)) + np.log(y_std.ravel()**2) + np.log(2*np.pi))))
 
+def area_calc(df):
+    # Adds an area per cell for use in area weighting
+    x = df['x']
+    y = df['y']
+    z = df['z']
+    lats = (180/np.pi) * np.arcsin(df['z'] / 2)
+    lons = (180/np.pi) * np.arctan2(df['x'] / 2, df['y'] / 2)
+    num_lons = len(set(np.round(lons,2)))
+    num_lats = len(set(np.round(lats,2)))
+    res_lat = 178/num_lats
+    res_lon = 360/num_lons
+    lat_upper_bound = lats + res_lat/2
+    lat_lower_bound = lats - res_lat/2
+    area = 2 * np.pi * (np.abs(np.sin(np.deg2rad(lat_upper_bound)) - np.sin(np.deg2rad(lat_lower_bound)))) / num_lons
+    return area / (4 * np.pi)
 
-save_path = 'Result_epoch100/{}'
+def awRMSE(y_pred, y, area_weights):    
+    y_pred = dn(y_pred)
+    y = dn(y)   
+    area_tot = np.sum(area_weights)    
+    SE = np.square(y_pred.ravel() - y.ravel())    
+    awMSE = np.nansum(area_weights * SE) / area_tot
+    RawMSE = np.sqrt(awMSE)    
+    return RawMSE
 
-Obs = np.loadtxt('Z_ERA5-Reanalysis_monthly_precipitation_1980to2014.txt', skiprows=1)
-neg_inx = np.argwhere(Obs[:,-1]<0).squeeze()
-Obs[neg_inx,5] = 0
 
+# #----------------------------------------------------------
+# #---- Define the data ----
+# #----------------------------------------------------------
+# Setup for saving
+save_path = '{}'
+
+# Load data
 time_len = 420
 lat_len = 29
 lon_len = 61
 
-obs = recube (Obs[:,5])
-#With 0.03 bias and 0.005 noise
-Model = obs.copy() - 0.03 + np.random.normal(size=[time_len, lat_len, lon_len]) * 0.005
-
-mdl1 = np.random.random( size = [time_len, lat_len, lon_len ]) *5+10
-mdl1[:,-15:, :-31] = Model [:,-15:, :-31]
- 
-mdl2 = np.random.random( size = [time_len, lat_len, lon_len ]) *5+10
-mdl2[:,:-15, :-31] = Model[:,:-15, :-31] 
- 
-mdl3 = np.random.random( size = [time_len, lat_len, lon_len ]) *5+10 
-mdl3[:,:-15, -31:] = Model[:,:-15, -31:] 
-
-mdl4 = np.random.random( size = [time_len, lat_len, lon_len ]) *5+10
-mdl4[:,-15:, -31:] = Model[:,-15:, -31:] 
-
-# Add noise
-# In the NW we have 0.01 noise
-obs[:,-15:, :-31] = obs[:,-15:, :-31] + np.random.normal(size=[time_len, 15, lon_len-31 ]) * 0.01
-# In the SW we have 0.02 noise
-obs[:,:-15, :-31] = obs[:,:-15, :-31] + np.random.normal(size=[time_len, lat_len-15, lon_len-31 ]) * 0.02
-# In the SE we have 0.01 noise
-obs[:,:-15, -31:] = obs[:,:-15, -31:] + np.random.normal(size=[time_len, lat_len-15, 31]) * 0.02
-# In the NE we have 0.02 noise
-obs[:,-15:, -31:] = obs[:,-15:, -31:] + np.random.normal(size=[time_len, 15, 31]) * 0.01
-
-
-Nmodel = 5  # num_simulation + obs
+Nmodel = 7  # num_simulation + obs
 Ndata = 742980
 Ntrain = lat_len*lon_len*12*20
 
-df = pd.DataFrame()
-df['mons'] = Obs[:,0]+1
-df['mon_num'] = Obs[:,2]
-df['lat'] = Obs[:,3]
-df['lon'] = Obs[:,4]+360
-df['Obs'] = obs.ravel()
-
-df['mdl1'] = mdl1.ravel()
-df['mdl2'] = mdl2.ravel()
-df['mdl3'] = mdl3.ravel()
-df['mdl4'] = mdl4.ravel()
-
-models = df[df.columns[4:]]
-
+df = pd.read_hdf('Scase2.h5')
 ModAve = df.iloc[:,5:].mean(axis=1)
-print(ModAve.shape, ModAve.min(), ModAve.max())
-models['ModAve'] = ModAve
-
 # Apply coordinate mapping lat,lon -> x,y,z
 lon = df['lon'] * np.pi / 180
 lat = df['lat'] * np.pi / 180
@@ -165,13 +149,27 @@ df['x'] = df['x'] * 2
 df['y'] = df['y'] * 2
 df['z'] = df['z'] * 2
 
-df['x_mon'] = df['x_mon'] * 1.0
-df['y_mon'] = df['y_mon'] * 1.0
+df['x_mon'] = df['x_mon'] * 2
+df['y_mon'] = df['y_mon'] * 2
 df['mons'] = df['mons'] * 1.0
 
 ##--- Create training and testing dataset
+# Ndata_inx = np.arange(Ndata)
+# random.shuffle(Ndata_inx)
+# Train_inx = Ndata_inx[:Ntrain]
+# Test_inx = Ndata_inx[Ntrain:]
+# df_train = df.iloc[Train_inx,:]
+# df_test = df.iloc[Test_inx,:]
+
+
 df_train = df.iloc[:Ntrain,:]
 df_test = df.iloc[Ntrain:,:]
+
+# print(df_train.head())
+# print(df_test.head())
+# print(df.max())
+# print(df.min())
+# exit()
 
 # In sample training
 X_train = df_train.drop(['Obs'],axis=1).values
@@ -185,15 +183,35 @@ y_test = df_test['Obs'].values.reshape(-1,1)
 X_at = df.drop(['Obs'],axis=1).values
 y_at = df['Obs'].values.reshape(-1,1)
 
-print('#Training data X and y size', np.shape(X_train), np.shape(y_train))
-print('#Testing data X and y size', np.shape(X_test), np.shape(y_test))
-print('#All the data X and y size', np.shape(X_at), np.shape(y_at))
+# print('#Training data X and y size', np.shape(X_train), np.shape(y_train))
+# print('#Testing data X and y size', np.shape(X_test), np.shape(y_test))
+# print('#All the data X and y size', np.shape(X_at), np.shape(y_at))
+# print(X_train[:2,:])
+# print(y_train[:2,:])
+# print(X_test[:2,:])
+# print(y_test[:2,:])
+# print(X_at[:2,:])
+# print(y_at[:2,:])
+
+# print(np.min(y_train[:20000]), np.max(y_train[:20000]))
+# print(np.min(y_train), np.max(y_train))
+# exit()
+
+# #----------------------------------------------------------
+# #---- Define the NN model ----
+# #----------------------------------------------------------
+# NN set up
+# tf.reset_default_graph()
 
 num_models = Nmodel-1
 
+# Bias mean is assumed 0
+bias_mean = 0.00
+bias_std = 0.01
+
 # prior on the noise 
-noise_mean = 0.015
-noise_std = 0.001
+noise_mean = 0.02
+noise_std = 0.004
 
 # hyperparameters
 n = X_train.shape[0]
@@ -203,24 +221,22 @@ y_dim = y_train.shape[1]
 
 n_ensembles = 50
 hidden_size = 100
-
-# Factor to account for 1st layer std being below 1
-
-init_stddev_1_w =  np.sqrt(3.0/(alpha_dim)) # tune the coefficient to ensure layer 1 mean=0, layer 1 std=1.0
+init_stddev_1_w =  np.sqrt(3.5/(alpha_dim)) # tune the coefficient to ensure layer 1 mean=0, layer 1 std=1.0
 init_stddev_1_b = init_stddev_1_w
-init_stddev_2_w =  np.sqrt(0.3/hidden_size) # tune the coefficient to ensure layer 1 mean=0, layer 1 std=1.0
+init_stddev_2_w =  np.sqrt(1.5/hidden_size) # tune the coefficient to ensure layer 1 mean=0, layer 1 std=1.0
 init_stddev_2_b = init_stddev_2_w
-init_stddev_noise_w = (0.01*noise_std)/np.sqrt(hidden_size)
+init_stddev_3_w = (1.26*bias_std)/np.sqrt(hidden_size)
+init_stddev_noise_w = (1.26*noise_std)/np.sqrt(hidden_size)
 
-lambda_anchor = 1.0/(np.array([init_stddev_1_w,init_stddev_1_b,init_stddev_2_w,init_stddev_2_b,init_stddev_noise_w])**2)
+lambda_anchor = 1.0/(np.array([init_stddev_1_w,init_stddev_1_b,init_stddev_2_w,init_stddev_2_b,init_stddev_3_w,init_stddev_noise_w])**2)
 
-n_epochs = 6000
+n_epochs = 700
 batch_size = 20000
-learning_rate = 0.00005
+learning_rate = 0.0001
 
 # NN class
 class NN():
-    def __init__(self, x_dim, y_dim, hidden_size, init_stddev_1_w, init_stddev_1_b, init_stddev_2_w, init_stddev_2_b, init_stddev_noise_w, learning_rate):
+    def __init__(self, x_dim, y_dim, hidden_size, init_stddev_1_w, init_stddev_1_b, init_stddev_2_w, init_stddev_2_b, init_stddev_3_w, init_stddev_noise_w, learning_rate, model_bias_from_layer):
         # setting up as for a usual NN
         self.x_dim = x_dim
         self.y_dim = y_dim
@@ -236,17 +252,31 @@ class NN():
         
         self.layer_1_w = tf.layers.Dense(hidden_size, activation=tf.nn.tanh,
                                          kernel_initializer=tf.random_normal_initializer(mean=0.,stddev=init_stddev_1_w),
-                                         bias_initializer=tf.random_normal_initializer(mean=0.,stddev=init_stddev_1_b))
+                                         bias_initializer=tf.random_normal_initializer(mean=0.,stddev=init_stddev_1_b),
+                                         kernel_regularizer=tf.keras.regularizers.L2(0.1),
+                                         bias_regularizer=tf.keras.regularizers.L2(0.1))
+
         self.layer_1 = self.layer_1_w.apply(self.spacetime)
+
+        self.layer_1 = tf.compat.v1.nn.dropout(self.layer_1, keep_prob = 0.95)
+
         self.layer_2_w = tf.layers.Dense(num_models, activation=None,
                                          kernel_initializer=tf.random_normal_initializer(mean=0.,stddev=init_stddev_2_w),
                                          bias_initializer=tf.random_normal_initializer(mean=0.,stddev=init_stddev_2_b))
         self.layer_2 = self.layer_2_w.apply(self.layer_1)
 
+        #self.layer_2 = tf.compat.v1.nn.dropout(self.layer_2, keep_prob = 0.7)
+
         self.model_coeff = tf.nn.softmax(self.layer_2)
 
+        self.modelbias_w = tf.layers.Dense(y_dim, activation=None, use_bias=False,
+                                           kernel_initializer=tf.random_normal_initializer(mean=0.,stddev=init_stddev_3_w))
+        if model_bias_from_layer == 1:
+            self.modelbias = self.modelbias_w.apply(self.layer_1)
+        elif model_bias_from_layer == 2:
+            self.modelbias = self.modelbias_w.apply(self.layer_2)
             
-        self.output = tf.reduce_sum(self.model_coeff * self.modelpred, axis=1) 
+        self.output = tf.reduce_sum(self.model_coeff * self.modelpred, axis=1) + tf.reshape(self.modelbias, [-1])
         
         self.noise_w = tf.layers.Dense(self.y_dim, activation=None, use_bias=False,
                                        kernel_initializer=tf.random_normal_initializer(mean=0.,stddev=init_stddev_noise_w))
@@ -259,29 +289,29 @@ class NN():
         num_data_inv = tf.cast(tf.divide(1, tf.shape(self.inputs)[0]), dtype=tf.float32)
 
         self.mse_ = num_data_inv * tf.reduce_sum(self.err_sq) 
-        self.loss_ = num_data_inv * (tf.reduce_sum(tf.divide(self.err_sq, self.noise_sq)) + tf.reduce_sum(tf.log(self.noise_sq)))
+        self.loss_ = num_data_inv * (tf.reduce_sum(tf.divide(self.err_sq, self.noise_sq)) + tf.reduce_sum(tf.log(self.noise_sq)))  +  tf.losses.get_regularization_loss()
         self.optimizer = self.opt_method.minimize(self.loss_)
 
         return
 
     def get_weights(self, sess):
         '''method to return current params'''
-        ops = [self.layer_1_w.kernel, self.layer_1_w.bias, self.layer_2_w.kernel, self.layer_2_w.bias,  self.noise_w.kernel]
-        w1, b1, w2, b2,  wn = sess.run(ops)
-        return w1, b1, w2, b2,  wn
+        ops = [self.layer_1_w.kernel, self.layer_1_w.bias, self.layer_2_w.kernel, self.layer_2_w.bias, self.modelbias_w.kernel, self.noise_w.kernel]
+        w1, b1, w2, b2, w3, wn = sess.run(ops)
+        return w1, b1, w2, b2, w3, wn
 
     def anchor(self, sess, lambda_anchor):
         '''regularise around initialised parameters'''
-        w1, b1, w2, b2, wn = self.get_weights(sess)
+        w1, b1, w2, b2, w3, wn = self.get_weights(sess)
 
         # get initial params
-        self.w1_init, self.b1_init, self.w2_init, self.b2_init,  self.wn_init = w1, b1, w2, b2, wn
+        self.w1_init, self.b1_init, self.w2_init, self.b2_init, self.w3_init, self.wn_init = w1, b1, w2, b2, w3, wn
         loss_anchor = lambda_anchor[0]*tf.reduce_sum(tf.square(self.w1_init - self.layer_1_w.kernel))
         loss_anchor += lambda_anchor[1]*tf.reduce_sum(tf.square(self.b1_init - self.layer_1_w.bias))
         loss_anchor += lambda_anchor[2]*tf.reduce_sum(tf.square(self.w2_init - self.layer_2_w.kernel))
         loss_anchor += lambda_anchor[3]*tf.reduce_sum(tf.square(self.b2_init - self.layer_2_w.bias))
-        
-        loss_anchor += lambda_anchor[4]*tf.reduce_sum(tf.square(self.wn_init - self.noise_w.kernel)) # new param
+        loss_anchor += lambda_anchor[4]*tf.reduce_sum(tf.square(self.w3_init - self.modelbias_w.kernel))
+        loss_anchor += lambda_anchor[5]*tf.reduce_sum(tf.square(self.wn_init - self.noise_w.kernel)) # new param
 
         self.loss_anchor = tf.cast(1.0/X_train.shape[0], dtype=tf.float32) * loss_anchor
         
@@ -306,6 +336,11 @@ class NN():
         feed = {self.inputs: x}
         alpha = sess.run(self.model_coeff, feed_dict=feed)
         return alpha
+    
+    def get_betas(self, x, sess):
+        feed = {self.inputs: x}
+        beta = sess.run(self.modelbias, feed_dict=feed)
+        return beta
 
     def get_alpha_w(self, x, sess):
         feed = {self.inputs: x}
@@ -336,6 +371,11 @@ def get_alphas(NNs, X_train):
         alphas.append(NNs[ens].get_alphas(X_train, sess))
     return alphas
 
+def get_betas(NNs, X_train):
+    betas = []
+    for ens in range(0,n_ensembles):
+        betas.append(NNs[ens].get_betas(X_train, sess))
+    return betas
 
 def get_layer2_output(NNs, X_train):
     alpha_w = []
@@ -372,7 +412,8 @@ init_weights = []
 
 # loop to initialise all ensemble members
 for ens in range(0,n_ensembles):
-    NNs.append(NN(x_dim, y_dim, hidden_size, init_stddev_1_w, init_stddev_1_b, init_stddev_2_w, init_stddev_2_b, init_stddev_noise_w,learning_rate))
+    NNs.append(NN(x_dim, y_dim, hidden_size, init_stddev_1_w, init_stddev_1_b, init_stddev_2_w, init_stddev_2_b, init_stddev_3_w, init_stddev_noise_w,
+                  learning_rate, 1))
     # initialise only unitialized variables - stops overwriting ensembles already created
     global_vars = tf.global_variables()
     is_not_initialized = sess.run([tf.is_variable_initialized(var) for var in global_vars])
@@ -388,52 +429,60 @@ for ens in range(0,n_ensembles):
 ## --- Check the Priors  -----
 ##------------------------------------------------------
 ## the number of data points used to check the priors=10000here * n_ensembles * num_models
-Nsample = lat_len*lon_len*5
+# Nsample = lat_len*lon_len*5
 
-X_train_short = X_train[:Nsample]
+# X_train_short = X_train[:Nsample]
 
-y_preds_train, y_preds_mu_train, y_preds_std_train, y_preds_std_train_epi, y_preds_noisesq_train = fn_predict_ensemble(NNs,X_train_short)
-plt.figure(figsize=(8,8))
-plt.errorbar(y_train[:Nsample], y_preds_mu_train[:Nsample], yerr=(y_preds_std_train*1)[:Nsample],linewidth = 0.25, color = 'gray', ms=2,mfc='red',mec='black', fmt='o')
-plt.plot(np.arange(np.min(y_train[:Nsample]), np.max(y_train[:Nsample]), 0.01), np.arange(np.min(y_train[:Nsample]), np.max(y_train[:Nsample]), 0.01), linewidth = 2, linestyle = 'dashed',zorder = 100)
-plt.xlabel('True concentration')
-plt.ylabel('Predicted concentration')
-plt.savefig('Prior_predictive_check.png')
-
-
-
-y_preds_train, y_preds_mu_train, y_preds_std_train, y_preds_std_train_epi, y_preds_noisesq_train = fn_predict_ensemble(NNs,X_train)
-
-# Alphas
-alphas = np.array(get_alphas(NNs, X_train_short))
-print('Alpha mean should be: {}'.format(1/num_models))
-print('Alpha mean is: {}'.format(np.mean(np.array(alphas).ravel())))
-print('Alpha std should be: {}'.format(np.sqrt((1/(1 + num_models)) * (1/num_models)*(1-(1/num_models)))))
-print('Alpha std is: {}'.format(np.mean(np.std(np.array(alphas), axis=0).ravel())))
-report_on_percentiles(alphas, np.array(1/num_models), np.mean(np.std(np.array(alphas), axis=0).ravel()))
-print('')
+# y_preds_train, y_preds_mu_train, y_preds_std_train, y_preds_std_train_epi, y_preds_noisesq_train = fn_predict_ensemble(NNs,X_train_short)
+# plt.figure(figsize=(8,8))
+# plt.errorbar(y_train[:Nsample], y_preds_mu_train[:Nsample], yerr=(y_preds_std_train*1)[:Nsample],linewidth = 0.25, color = 'gray', ms=2,mfc='red',mec='black', fmt='o')
+# plt.plot(np.arange(np.min(y_train[:Nsample]), np.max(y_train[:Nsample]), 0.01), np.arange(np.min(y_train[:Nsample]), np.max(y_train[:Nsample]), 0.01), linewidth = 2, linestyle = 'dashed',zorder = 100)
+# plt.xlabel('True concentration')
+# plt.ylabel('Predicted concentration')
+# plt.savefig('Prior_predictive_check.png')
 
 
-### Network weights
-print('For the layers')
-w1 = np.array(get_w1(NNs, X_train_short))
-alpha_w = np.array(get_alpha_w(NNs, X_train_short))
-print('Layer 1 mean: {}'.format(np.mean(w1.ravel())))
-print('Layer 2 mean: {}'.format(np.mean(alpha_w.ravel())))
-print('Layer 1 Std: {}'.format(np.mean(np.std(w1, axis=0).ravel())))
-print('Layer 2 Std: {}'.format(np.mean(np.std(alpha_w, axis=0).ravel())))
-print('')
 
-### Noise
-print('For noise')
-pred_noise = np.sqrt(np.array([NN.get_noise_sq(X_train, sess) for NN in NNs]))
-print('Mean noise is: {}'.format(np.mean(pred_noise)))
-print('Mean noise should be: {}'.format(noise_mean))
-print('Std noise is: {}'.format(np.std(pred_noise)))
-print('Std noise should be: {}'.format(noise_std))
+# y_preds_train, y_preds_mu_train, y_preds_std_train, y_preds_std_train_epi, y_preds_noisesq_train = fn_predict_ensemble(NNs,X_train)
 
-report_on_percentiles(pred_noise, np.array(noise_mean), np.array(noise_std))
-print('')
+# # Alphas
+# alphas = np.array(get_alphas(NNs, X_train_short))
+# print('Alpha mean should be: {}'.format(1/num_models))
+# print('Alpha mean is: {}'.format(np.mean(np.array(alphas).ravel())))
+# print('Alpha std should be: {}'.format(np.sqrt((1/(1 + num_models)) * (1/num_models)*(1-(1/num_models)))))
+# print('Alpha std is: {}'.format(np.mean(np.std(np.array(alphas), axis=0).ravel())))
+# report_on_percentiles(alphas, np.array(1/num_models), np.mean(np.std(np.array(alphas), axis=0).ravel()))
+# print('')
+
+
+# ### Network weights
+# print('For the layers')
+# w1 = np.array(get_w1(NNs, X_train_short))
+# alpha_w = np.array(get_alpha_w(NNs, X_train_short))
+# print('Layer 1 mean: {}'.format(np.mean(w1.ravel())))
+# print('Layer 2 mean: {}'.format(np.mean(alpha_w.ravel())))
+# print('Layer 1 Std: {}'.format(np.mean(np.std(w1, axis=0).ravel())))
+# print('Layer 2 Std: {}'.format(np.mean(np.std(alpha_w, axis=0).ravel())))
+# print('')
+
+# ### Noise
+# print('For noise')
+# pred_noise = np.sqrt(np.array([NN.get_noise_sq(X_train, sess) for NN in NNs]))
+# print('Mean noise is: {}'.format(np.mean(pred_noise)))
+# print('Mean noise should be: {}'.format(noise_mean))
+# print('Std noise is: {}'.format(np.std(pred_noise)))
+# print('Std noise should be: {}'.format(noise_std))
+
+# report_on_percentiles(pred_noise, np.array(noise_mean), np.array(noise_std))
+# print('')
+
+
+
+# exit()
+
+
+
+
 
 ##----------------------------------
 ## -----  Training  ----------
@@ -469,13 +518,13 @@ for ens in range(0,n_ensembles):
             losses.append(loss_anch)
             mses.append(loss_mse)
             anchs.append(loss_anch_term)
-        if (ep_ % 10 == 0):
+        if (ep_ % 1 == 0):
             print('epoch:' + str(ep_) + ' at ' + str(datetime.datetime.now()))
             print('--- rmse_', np.round(np.sqrt(loss_mse),5), ', loss_anch', np.round(loss_anch,5), ', anch_term', np.round(loss_anch_term,5))
         # If saving weights
-        if (ep_ % 500 == 0):      
-            weight = NNs[ens].get_weights(sess)
-            pkl.dump(weight, open(save_path.format('weights{}_{}.pkl'.format(ens,ep_)), 'wb'))
+        # if (ep_ % 100 == 0):      
+        #     weight = NNs[ens].get_weights(sess)
+        #     pkl.dump(weight, open(save_path.format('weights{}_{}.pkl'.format(ens,ep_)), 'wb'))
 
     l_s.append(losses)
     m_s.append(mses)
@@ -501,13 +550,17 @@ fig.tight_layout()
 plt.savefig('Loss.png')
 
 # exit()
-
-print ((np.array(l_s).T).shape)
-
+##----------------------------------
+## Make predictions
+##----------------------------------
+## -- use trained NN ensemble to generate predictions
 y_preds_train, y_preds_mu_train, y_preds_std_train,  y_preds_std_train_epi, y_preds_noisesq_train = fn_predict_ensemble(NNs,X_train)
 y_preds_test, y_preds_mu_test, y_preds_std_test,  y_preds_std_test_epi, y_preds_noisesq_test = fn_predict_ensemble(NNs,X_test)
 y_preds_at, y_preds_mu_at, y_preds_std_at,  y_preds_std_at_epi, y_preds_noisesq_at= fn_predict_ensemble(NNs,X_at)
 
+# ## -- save epistemic uncertainty
+epi = recube(y_preds_std_at_epi)
+pkl.dump(epi, open('epi.pkl', 'wb'))
 
 ## -- scale it back to original space
 y_preds_mu_train = dn(y_preds_mu_train)
@@ -536,22 +589,7 @@ print('min and max of BNN_train: ', y_preds_mu_train.min(), y_preds_mu_train.max
 print('min and max of BNN_test: ', y_preds_mu_test.min(), y_preds_mu_test.max())
 print('min and max of obs: ', y_at.min(), y_at.max())
 
-fig = plt.figure(figsize=(5,4))
-sns.distplot(y_preds_mu_at, hist=False, kde=True, label='BNN average',color='blue', kde_kws={'linestyle':'--'})
-sns.distplot(ModAve, hist=False, kde=True, label='Simple average',color='green', kde_kws={'linestyle':'-.'})
-sns.distplot(y_at, hist=False, kde=True, label='Obs',color='red', kde_kws={'linestyle':'-'})
-plt.legend(prop={'size': 10})
-plt.xlabel('Precip (monthly)')
-plt.ylabel('Density')  
-plt.xlim([0,16])
-plt.savefig('Hist_precip.png')
-#plt.show()
 
-
-print(' -------- For train -------- ')
-report_on_percentiles(y_train, y_preds_mu_train, y_preds_std_train)
-print(' -------- For test -------- ')
-report_on_percentiles(y_test, y_preds_mu_test, y_preds_std_test)
 
 ## -------------------------------------
 # Model Coefficients-- alpha
@@ -563,10 +601,10 @@ print('Shape of alphas and alpha: ', np.shape(alphas), np.shape(alpha))
 ##-- save alpha [#data, #model]
 pkl.dump(alpha, open('alpha.pkl', 'wb'))
 
-fig = plt.figure(figsize=(18,6))
+fig = plt.figure(figsize=(18,9))
 for i in range(num_models):
     a = alphas[:,:,i]
-    plt.subplot(2,2,i + 1)
+    plt.subplot(3,2,i + 1)
     #plt.plot([0,Ntime], [1/num_models,1/num_models], '--', color='black')
     plt.plot(np.mean(recube(np.mean(a, axis=0)), axis=(1,2)))
     #print ("model", i, np.mean(recube(np.mean(a, axis=0)), axis=(1,2)))
@@ -579,6 +617,17 @@ for i in range(num_models):
 fig.tight_layout()
 plt.savefig('Mean_Alphas.png')
 #exit()
+## average seasonaility
+
+
+# Model bias
+## -------------------------------------
+betas = np.array(get_betas(NNs, X_at))
+beta = np.mean(betas, axis=0)
+print('Shape of betas and beta: ', np.shape(betas), np.shape(beta))
+
+##- save model bias beta[#data,1] 
+pkl.dump(beta, open('beta.pkl', 'wb'))
 
 
 ## -------------------------------------
@@ -598,9 +647,18 @@ a_n = recube(np.sqrt(np.mean(np.array(aletoric_noise), axis=0)))
 ## - save noise a_n[#data,1]
 pkl.dump(a_n, open('aleatoric_noise.pkl', 'wb'))
 
-epi = recube(y_preds_std_at_epi)
-pkl.dump(epi, open('epi.pkl', 'wb'))
-print (epi.shape)
-
+## -- Average aleatoric noise over time
 
 saver.save(sess,'net/my_net.ckpt')
+
+
+fig = plt.figure(figsize=(5,4))
+sns.distplot(y_preds_mu_at, hist=False, kde=True, label='BNN average',color='blue', kde_kws={'linestyle':'--'})
+sns.distplot(ModAve, hist=False, kde=True, label='Simple average',color='green', kde_kws={'linestyle':'-.'})
+sns.distplot(y_at, hist=False, kde=True, label='Obs',color='red', kde_kws={'linestyle':'-'})
+plt.legend(prop={'size': 10})
+plt.xlabel('Precip (monthly)')
+plt.ylabel('Density')  
+plt.xlim([0,10])
+plt.savefig('Hist_precip.png',dpi=600)
+#plt.show()
