@@ -7,7 +7,7 @@ The full journal paper with detailed description of the model application is in 
 
 # Prerequisite
 
-To run the code, make sure these packages are installed in addition to the commonly used Numpy, Pandas, Matplotlib, Seaborn, Sklearn, Pickle,etc.
+To run the code, make sure these packages are installed in addition to the commonly used Numpy, Pandas, Matplotlib, Seaborn, Sklearn, Pickle, etc.
 
 python >=3.6, 
 tensorflow-gpu == 1.15, 
