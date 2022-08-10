@@ -5,8 +5,10 @@ We develop a Bayesian Neural Network (BNN) ensemble approach for large-scale pre
 
 The full journal paper with detailed description of the model application is in arXiv https://arxiv.org/abs/2208.04390. 
 
-#Prerequisite
+# Prerequisite
+
 To run the code, make sure these packages are installed in addition to the commonly used Numpy, Pandas, Matplotlib, Seaborn, Sklearn, Pickle,etc.
+
 python >=3.6, 
 tensorflow-gpu == 1.15, 
 matplotlib == 3.2.1, 
