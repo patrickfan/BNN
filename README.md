@@ -10,16 +10,10 @@ The full journal paper with detailed description of the model application is in 
 To run the code, make sure these packages are installed in addition to the commonly used Numpy, Pandas, Matplotlib, Seaborn, Sklearn etc.
 
 python >=3.6 
-
 tensorflow-gpu == 1.15
-
 matplotlib == 3.4.3
-
 numpy == 1.20.3
-
 scikit-learn == 0.24.2
-
 pandas == 1.3.4
-
 seaborn == 0.11.2
 
